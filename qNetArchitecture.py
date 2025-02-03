@@ -1,5 +1,6 @@
 #%%
 import gymnasium as gym
+from IPython import display
 import math
 import os
 import random
@@ -32,17 +33,17 @@ class ReplayMemory(object):
 # Initialize weights
 def initialize_weights(m):
     if isinstance(m, nn.Linear):
-        nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')  # He initialization
+        nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')  # initialization
         if m.bias is not None:
             nn.init.zeros_(m.bias)  # Set biases to 0
 
 # define Q-net with 3 layers, which takes in states and returns a Q value for each action
 class DQN_2HL(nn.Module):
-    def __init__(self, n_observations, n_actions):
+    def __init__(self, n_observations, n_actions, n_nodes):
         super(DQN_2HL, self).__init__()
-        self.layer1 = nn.Linear(n_observations, 15)
-        self.layer2 = nn.Linear(15,15)
-        self.layer3 = nn.Linear(15, n_actions)
+        self.layer1 = nn.Linear(n_observations, n_nodes)
+        self.layer2 = nn.Linear(n_nodes,n_nodes)
+        self.layer3 = nn.Linear(n_nodes, n_actions)
 
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[left0exp,right0exp]...]).
@@ -52,12 +53,12 @@ class DQN_2HL(nn.Module):
         return self.layer3(x)
 
 class DQN_3HL(nn.Module):
-    def __init__(self, n_observations, n_actions):
+    def __init__(self, n_observations, n_actions, n_nodes):
         super(DQN_3HL, self).__init__()
-        self.layer1 = nn.Linear(n_observations, 24)
-        self.layer2 = nn.Linear(24,24)
-        self.layer3 = nn.Linear(24,20)
-        self.layer4 = nn.Linear(20, n_actions)
+        self.layer1 = nn.Linear(n_observations, n_nodes)
+        self.layer2 = nn.Linear(n_nodes,n_nodes)
+        self.layer3 = nn.Linear(n_nodes,n_nodes)
+        self.layer4 = nn.Linear(n_nodes,n_actions)
 
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[left0exp,right0exp]...]).
@@ -67,8 +68,42 @@ class DQN_3HL(nn.Module):
         x = F.relu(self.layer3(x))
         return self.layer4(x)
 
+class DQN_4HL_2(nn.Module):
+    def __init__(self, n_observations, n_actions, n_nodes):
+        super(DQN_4HL_2, self).__init__()
+        self.layer1 = nn.Linear(n_observations, n_nodes)
+        self.layer2 = nn.Linear(n_nodes,n_nodes)
+        self.layer3 = nn.Linear(n_nodes,20)
+        self.layer4 = nn.Linear(20,n_actions)
+
+    # Called with either one element to determine next action, or a batch
+    # during optimization. Returns tensor([[left0exp,right0exp]...]).
+    def forward(self, x):
+        x = F.relu(self.layer1(x))
+        x = F.relu(self.layer2(x))
+        x = F.relu(self.layer3(x))
+        return self.layer4(x)
+    
+class DQN_4HL(nn.Module):
+    def __init__(self, n_observations, n_actions, n_nodes):
+        super(DQN_4HL, self).__init__()
+        self.layer1 = nn.Linear(n_observations, n_nodes)
+        self.layer2 = nn.Linear(n_nodes,n_nodes)
+        self.layer3 = nn.Linear(n_nodes,n_nodes)
+        self.layer4 = nn.Linear(n_nodes,n_nodes)
+        self.layer5 = nn.Linear(n_nodes, n_actions)
+
+    # Called with either one element to determine next action, or a batch
+    # during optimization. Returns tensor([[left0exp,right0exp]...]).
+    def forward(self, x):
+        x = F.relu(self.layer1(x))
+        x = F.relu(self.layer2(x))
+        x = F.relu(self.layer3(x))
+        x = F.relu(self.layer4(x))
+        return self.layer5(x)
+
 class MsPacmanGame():
-    def __init__(self, seed = random.randint(0,100), device=torch.device("cuda" if torch.cuda.is_available() else "cpu"), DQN=DQN_3HL):
+    def __init__(self, N_nodes=24, seed = random.randint(0,100), device=torch.device("cuda" if torch.cuda.is_available() else "cpu"), DQN=DQN_3HL, weightsFile=''):
         # set up pacman game
         #env = gym.make("MsPacmanNoFrameskip-v4", full_action_space = False, render_mode = "human")
         #self.env = gym.make("ALE/MsPacman-v5", full_action_space = False) 
@@ -86,14 +121,19 @@ class MsPacmanGame():
         # length of state vector
         self.n_observations = 24
         # make neural net for Q determination
-        self.policy_net = self.DQN(self.n_observations, self.n_actions).to(self.device)
+        self.N_nodes = N_nodes
+        self.policy_net = self.DQN(self.n_observations, self.n_actions, N_nodes).to(self.device)
 
-        # initalize weights for each layer
-        self.policy_net.apply(initialize_weights)
+        if weightsFile == '':
+            # initalize weights for each layer
+            self.policy_net.apply(initialize_weights)
+        else:
+            # Import previously trainned weight values
+            self.policy_net.load_state_dict(torch.load(weightsFile)) 
 
         self.seed = seed
 
-    def trainingParameters(self, batchsize, gamma, eps_start, eps_end, eps_decay, tau, lr):
+    def trainingParameters(self, batchsize, gamma, eps_start, eps_end, eps_decay, tau, lr, ucb):
         self.BATCH_SIZE = batchsize # BATCH_SIZE is the number of transitions sampled from the replay buffer
         self.GAMMA = gamma # GAMMA is the discount factor as mentioned in the previous section
         self.EPS_START = eps_start # EPS_START is the starting value of epsilon
@@ -102,6 +142,9 @@ class MsPacmanGame():
         self.TAU = tau # TAU is the update rate of the target network
         self.LR = lr # LR is the learning rate of the ``AdamW`` optimizer
         self.steps_done = 0
+        self.randomPicked = 0
+        self.maxActionPicked = 0
+        self.UCB_C = ucb
 
 
     # select which action to take by applying the Q-Net and choosing a producing Qmax
@@ -109,24 +152,32 @@ class MsPacmanGame():
         sample = random.random()
         eps_threshold = self.EPS_END + (self.EPS_START - self.EPS_END) * \
             math.exp(-1. * self.steps_done / self.EPS_DECAY)
+        #(f"epsilon threshold = {eps_threshold}")
+
         self.steps_done += 1
         if sample > eps_threshold:
             with torch.no_grad():
                 # t.max(1) will return the largest column value of each row.
                 # second column on max result is index of where max element was
                 # found, so we pick action with the larger expected reward.
-                return self.policy_net(state).argmax().view(1,1)
+                self.maxActionPicked += 1
+                Q = self.policy_net(state)
+                return Q.argmax().view(1,1), Q.max()
         else: # randomly sample
-            return torch.tensor([[self.env.action_space.sample()]], device=self.device, dtype=torch.long)
+            self.randomPicked += 1
+            with torch.no_grad():
+                return torch.tensor([[self.env.action_space.sample()]], device=self.device, dtype=torch.long), self.policy_net(state).max()
 
     # select which action to take by applying the Q-Net and choosing a producing Qmax
     def select_action_UCB(self, state):
-        UCB_C = 5.0
         self.steps_done += 1
 
-        bonus = UCB_C * np.sqrt(np.log(self.steps_done)/self.Na)
+        bonus = self.UCB_C * np.sqrt(np.log(self.steps_done)/(self.Na + 1e-5))
+        #print(print(f"bonus = {bonus}"))
+
         Q = self.policy_net(state)
-        ucb_values = Q + torch.Tensor(bonus.copy())
+
+        ucb_values = Q + torch.tensor(bonus.copy(), device=Q.device)
 
         # pick action
         with torch.no_grad(): 
@@ -135,14 +186,20 @@ class MsPacmanGame():
         # increment count 
         self.Na[A] += 1
 
-        return A
+        if A == Q.argmax():
+            self.maxActionPicked += 1
+        else:
+            self.randomPicked += 1
+
+        return A, Q.max()
 
     def regular_action_select(self, state):
         with torch.no_grad():
                 # t.max(1) will return the largest column value of each row.
                 # second column on max result is index of where max element was
                 # found, so we pick action with the larger expected reward.
-                return self.policy_net(state).argmax().view(1,1)
+                Q = self.policy_net(state)
+                return Q.argmax().view(1,1), Q.max()
 
     def optimize_model(self):
         if len(self.memory) < self.BATCH_SIZE: # only update weights of netword when batch size is reached
@@ -175,22 +232,22 @@ class MsPacmanGame():
         next_state_values = torch.zeros(self.BATCH_SIZE, device=self.device)
         with torch.no_grad():
             next_state_values[non_final_mask] = self.target_net(non_final_next_states).max(1)[0]
-        # Compute the expected Q values
+        # Compute the expected Q values  --performing--> GAMMA*Q(s_{t+1}) + R 
         expected_state_action_values = (next_state_values * self.GAMMA) + reward_batch
 
-        # Compute Huber loss:  Q(s_t, a) - [GAMMA*Q(s_{t+1}) + R ]
+        # Compute L1 (Huber loss):  Q(s_t, a) - [GAMMA*Q(s_{t+1}) + R ]
         criterion = nn.SmoothL1Loss()
         loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
 
         # Optimize the model
-        self.optimizer.zero_grad() # perform gradient decent to update Q values using Q - lr*loss
-        loss.backward()
+        self.optimizer.zero_grad() # set gradients to zero from last step
+        loss.backward() # calculate gradients for smoothL1Loss
         # In-place gradient clipping
         torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
-        self.optimizer.step()
+        self.optimizer.step() # perform gradient decent to update Q values using Q - lr*loss
         return loss.item()
 
-    def playGame(self, trainMode):
+    def playGame(self, trainMode, GhostReward=True, plotInline=False):
         # keeping track of previous boards for ghost search 
         boardTime = []
         blankBoard = np.zeros([171,160,3])
@@ -219,10 +276,28 @@ class MsPacmanGame():
 
         lifePrev = 3
 
+        if plotInline:
+            img = plt.imshow(self.env.render()) # only call this once
+            plt.axis('off')
         # starting game loop
+
+        dur = 0 # keep track of how many rounds were played 
+        gameRewards = []
+        Qs = []
+
         while not(done):
+            if plotInline: # plot as image
+                img.set_data(self.env.render()) # just update the data in the plotted image
+                display.display(plt.gcf())
+                display.clear_output(wait=True)
+
             # choose action to take
-            action = self.actionFunc(state)
+            action, Q = self.actionFunc(state)
+            #print(f"action = {action}, Q = {Q}")
+
+            Qs.append(float(Q))
+
+            dur += 1 # game step was taken
 
             # make action
             observation, reward, terminated, truncated, info = self.env.step(action.item())
@@ -246,33 +321,35 @@ class MsPacmanGame():
             if info['lives'] < lifePrev:
                 reward -= 1
                 # Remove the last 3 elements from training data memory (heuristic bc packman can't move for a few turns after being eaten by ghost)
+                '''
                 if trainMode:
                     for _ in range(3):
                         self.memory.memory.pop()
-            
+                '''
             # check ghost distances to run away from them 
-            y, x = getPacmanLocation(board)
-            d_ghost1, d_ghost2, d_ghost3, d_ghost4, d_ghostGood  = getGhostDistances(np.stack(boardTime,axis=-1), y, x, self.movementMask, ghostDist = True)
+            if GhostReward:
+                y, x = getPacmanLocation(board)
+                d_ghost1, d_ghost2, d_ghost3, d_ghost4, d_ghostGood  = getGhostDistances(np.stack(boardTime,axis=-1), y, x, self.movementMask, ghostDist = True)
 
-            d_ghost1 = 1 if d_ghost1 == 0 else d_ghost1
-            d_ghost2 = 1 if d_ghost2 == 0 else d_ghost2
-            d_ghost3 = 1 if d_ghost3 == 0 else d_ghost3
-            d_ghost4 = 1 if d_ghost4 == 0 else d_ghost4
-            d_ghostGood = 1 if d_ghostGood == 0 else d_ghostGood
+                d_ghost1 = 1 if d_ghost1 == 0 else d_ghost1
+                d_ghost2 = 1 if d_ghost2 == 0 else d_ghost2
+                d_ghost3 = 1 if d_ghost3 == 0 else d_ghost3
+                d_ghost4 = 1 if d_ghost4 == 0 else d_ghost4
+                d_ghostGood = 1 if d_ghostGood == 0 else d_ghostGood
 
-            # reward is decreased if too close to a ghost, and increased if close to a flashing ghost (normalize between 0 and 1)
-            reward -= (1/d_ghost1 + 1/d_ghost2 + 1/d_ghost3 + 1/d_ghost4) /4
-            reward += 1/d_ghostGood
+                # reward is decreased if too close to a ghost, and increased if close to a flashing ghost (normalize between 0 and 1)
+                reward -= (1/d_ghost1 + 1/d_ghost2 + 1/d_ghost3 + 1/d_ghost4) /4
+                reward += 1/d_ghostGood
 
-            # min distance between pacman and supercoin
-            dSuperCoinMin = superCoinDistance(np.stack(boardTime,axis=-1), y, x)
+                # min distance between pacman and supercoin
+                dSuperCoinMin = superCoinDistance(np.stack(boardTime,axis=-1), y, x)
 
-            dSuperCoinMin = 1 if dSuperCoinMin == 0 else dSuperCoinMin
-            
-            # rewarded for being close to super coin 
-            reward += 1/dSuperCoinMin
+                dSuperCoinMin = 1 if dSuperCoinMin == 0 else dSuperCoinMin
+                
+                # rewarded for being close to super coin 
+                reward += 1/dSuperCoinMin
 
-            # determine reward
+            gameRewards.append(reward)
             reward = torch.tensor([reward], device=self.device)
 
             # calculate state after taking that action
@@ -305,7 +382,7 @@ class MsPacmanGame():
             # lost a life (takes some time to start game again)
             if done: 
                 self.env.close()
-                return scoreGame, errorGame
+                return scoreGame, errorGame, dur, sum(gameRewards)/len(gameRewards), sum(Qs)/len(Qs)
             elif info['lives'] < lifePrev:
                 observation, reward, terminated, truncated, info = dummyGame(self.env)
                 state = stateMaker(np.stack(boardTime,axis=-1), self.coinLoc, self.movementMask, self.device)
@@ -313,7 +390,7 @@ class MsPacmanGame():
             # update life 
             lifePrev = info['lives']
 
-    def train(self, actionSelected = "", epochs=10, batchsize=100, gamma=0.6, eps_start=0.9, eps_end=0.05, eps_decay=1000, tau=1, lr=0.5, saveName="", show=1):
+    def train(self, actionSelected = "", epochs=10, batchsize=100, gamma=0.6, eps_start=0.9, eps_end=0.05, eps_decay=1000, tau=1, lr=0.001, ucb=0.5, saveName="", show=1, GhostReward=True, save=True):
         # initalize game
         if show:
             self.env = gym.make("ALE/MsPacman-v5", full_action_space = False, render_mode = "human")
@@ -330,37 +407,45 @@ class MsPacmanGame():
             self.actionFunc = self.regular_action_select
 
         # initalize training parameters
-        self.trainingParameters(batchsize, gamma, eps_start, eps_end, eps_decay, tau, lr)
+        self.trainingParameters(batchsize, gamma, eps_start, eps_end, eps_decay, tau, lr, ucb)
 
         # transition is the data saved for each training step (state, action, nextState, reward)
         global Transition
         Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
 
         # make target net (copy of policy net)
-        self.target_net = self.DQN(self.n_observations, self.n_actions).to(self.device)
+        self.target_net = self.DQN(self.n_observations, self.n_actions, self.N_nodes).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
 
         self.optimizer = optim.AdamW(self.policy_net.parameters(), lr=self.LR, amsgrad=True)
         self.memory = ReplayMemory(10000)
 
+        print('training...')
+        print(f"Using {self.DQN} with {self.N_nodes} nodes, with policy net {id(self.policy_net)} , and {id(self.target_net)}. lr = {self.LR}, gamma = {self.GAMMA}, tau = {self.TAU}. Action = {self.actionFunc}. Memory address for model is {id(self.memory)}")
+
         errorAll = [] # a list of scores per game, for every game played
         scoreAll = [] # one score per game
+        durAll =[]
+        avrgRewardAll = []
+        avrgQAll = []
 
         for i_episode in range(epochs):
             
             print("episode: ", i_episode)
 
-            score, error = self.playGame(True)
+            score, error, dur, avrgReward, avrgQ = self.playGame(True, GhostReward=GhostReward)
             
             print('Complete with score: ', score)
 
             errorAll.append(sum(error)/float(len(error)))
-            #errorAll.extend(error)
             scoreAll.append(score)
+            durAll.append(dur)
+            avrgRewardAll.append(avrgReward)
+            avrgQAll.append(avrgQ)
 
         # save nn's weights
         # save weights
-        if saveName:
+        if save:
             fileName = saveName + '_policy_net_weights_'+ str(epochs) + 'epochs.pth'
             torch.save(self.policy_net.state_dict(), fileName)
             
@@ -373,25 +458,26 @@ class MsPacmanGame():
             with open(fileName, 'wb') as file:
                 pickle.dump(scoreAll, file)
 
-        return scoreAll, errorAll
+        print(f"max action picked = {self.maxActionPicked}, random action picked = {self.randomPicked}")
+
+        return scoreAll, errorAll, durAll, avrgRewardAll, avrgQAll
         
         
-    def play(self, weightsFile = '', show = 1):
+    def play(self, show = 1, plotInline=False):
         # initalize game
         if show:
-            self.env = gym.make("ALE/MsPacman-v5", full_action_space = False, render_mode = "human")
+            if plotInline:  # will plot it inline for jupyter notebook
+                self.env = gym.make("ALE/MsPacman-v5", full_action_space = False, render_mode = "rgb_array")
+            else: # will create a window to play the game
+                self.env = gym.make("ALE/MsPacman-v5", full_action_space = False, render_mode = "human")
         else:
             self.env = gym.make("ALE/MsPacman-v5", full_action_space = False)
 
         self.actionFunc = self.regular_action_select
-    
-        if os.path.isfile(weightsFile):
-            # Import previously trainned weight values
-            self.policy_net.load_state_dict(torch.load(weightsFile)) 
 
-        score, error = self.playGame(False)
+        score, error, dur, avrgReward, avrgQ = self.playGame(False, plotInline=plotInline)
             
-        return score, error
+        return score, error, dur, avrgReward, avrgQ
 
 
 #%%
@@ -414,9 +500,9 @@ if __name__ == "__main__":
     DQN = DQN_3HL
 
     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    '''
     pacmanGame = MsPacmanGame(DQN = DQN)
 
-    '''
     # train Q-net by playing the game and learning from trial and error
     scoreAll, errorGame = pacmanGame.train(saveName=name, actionSelected = actionSelected, epochs=20, gamma=0.9, eps_start=0.9, eps_end=0.2, eps_decay=1000, tau=0.01, lr=0.001, show=0)
 
@@ -436,9 +522,38 @@ if __name__ == "__main__":
     score, error = pacmanGame.play()
     print("Game ended with score: ", score)
 
-    '''
-    weightsFile = '/pacmanAutonomousGame/QNET_3HL_policy_net_weights_200epochs.pth'
-    score, error = pacmanGame.play(weightsFile = weightsFile)
+    
+    weightsFile = 'pacmanAutonomousGame/QNET_3HL_BEST_policy_net_weights_200epochs.pth'
+    
+    pacmanGame = MsPacmanGame(DQN = DQN, weightsFile = weightsFile)
+    
+    score, error = pacmanGame.play()
 
     print("Game ended with score: ", score)
     
+    Nepochs = 20
+    
+    # train Q-net by playing the game and learning from trial and error
+    scoreAll, errorGame = pacmanGame.train(saveName=name + '_lr1e-6_onlyCoinReward', GhostReward=False, actionSelected = actionSelected, epochs=Nepochs, gamma=0.7, eps_start=0.9, eps_end=0.3, eps_decay=5000, tau=0.01, lr=1e-6, show=0)
+
+    # plotting
+    plt.plot(errorGame)
+    plt.ylabel("Error")
+    plt.xlabel("Epoch")
+    plt.title("Q-Net's error")
+    plt.show()
+
+    plt.plot(scoreAll)
+    plt.ylabel("Score")
+    plt.xlabel("Epoch")
+    plt.title("Game Score")
+    plt.show()
+    
+    score, error = pacmanGame.play()
+    print("Game ended with score: ", score)
+    '''
+
+    pacmanGame = MsPacmanGame(DQN = DQN_2HL)
+
+    #avrgReward, avrgQ 
+    scoreAll, errorGame, gameDur, rewardsAll, QsAll = pacmanGame.train(actionSelected='ucb')
